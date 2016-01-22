@@ -1,0 +1,52 @@
+# -----------------------------------------------------------------------------
+# Overwrite configuration file for jarvis-install (clone installation).
+#
+# Please read the documentation for instructions.
+#
+# This file is part of the project http://github.com
+#
+# Copyright Bernhard Bablok (mail at bablokb dot de)
+#
+# Released under the GPL V3
+#
+# -----------------------------------------------------------------------------
+
+# include basic configuration
+# read configuration
+: ${CFG_FILE:=$0.cfg}
+if [ -f "$CFG_FILE" ]; then
+   source "$CFG_FILE"
+else
+   echo "error: could not find $CFG_FILE!"
+   exit 3
+fi
+
+# turn on everything you also turned on in the original installation
+# (use your values from jarvis-install.cfg)
+
+INSTALL_jarvis=1              # required
+INSTALL_pocketsphinx=1        # set to 0 if compiled from source (model 1)
+INSTALL_pocketsphinx_data=1   # needed if compiled from source (model 1)
+INSTALL_pocketsphinx_cfg=1    # jarvis-configuration for pocketsphinx
+INSTALL_julius_cfg=1          # jarvis-configuration for julius
+
+INSTALL_espeak=1
+INSTALL_festival=1
+INSTALL_flite=1
+INSTALL_svoxpico=1
+INSTALL_google_tts=1
+INSTALL_ivona=1
+
+# everything turned off here: this is cloned from the original installation
+# (copy of $PREFIX-directory)
+
+INSTALL_pocketsphinx_src=0
+INSTALL_CMUCLMTK=0
+INSTALL_openfst=0
+INSTALL_m2m_aligner=0
+INSTALL_mitlm=0
+INSTALL_phonetisaurus=0
+INSTALL_phonetisaurus_exp=0
+INSTALL_phonetisaurus_fst=0
+INSTALL_julius=0
+INSTALL_julius_modlex=0
