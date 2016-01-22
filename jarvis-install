@@ -16,7 +16,7 @@
 
 usage() {
   local pgm=`basename $0`
-  echo -e "\n$pgm: install japser and it's prereqs\n\
+  echo -e "\n$pgm: install jarvis and it's prereqs\n\
   \nusage: $pgm [options] all | module ...\n\
   Possible options:\n\
     -C cfgfile  use cfgfile instead of jarvis-install.cfg as config-file\n\
