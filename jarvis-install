@@ -1,0 +1,719 @@
+#!/bin/bash
+# -----------------------------------------------------------------------------
+# This script installs all software components to run jarvis. This script
+# mainly translates the textual instructions on the jarvis project site
+# to script code.
+#
+# This file is part of the project https://github.com/affordablewindurbines/jarvisproject.git
+#
+# Copyright Johnny Heath 
+#
+# Released under the GPL V3
+#
+# -----------------------------------------------------------------------------
+
+# usage message   -------------------------------------------------------------
+
+usage() {
+  local pgm=`basename $0`
+  echo -e "\n$pgm: install japser and it's prereqs\n\
+  \nusage: $pgm [options] all | module ...\n\
+  Possible options:\n\
+    -C cfgfile  use cfgfile instead of jarvis-install.cfg as config-file\n\
+    -L logfile  use logfile instead of jarvis-install.log as log-file\n\
+    -f          force installation\n\
+    -S          don't install, just print a summary of last installation\n\
+    -h          show this help\n\
+"
+  exit 3
+}
+
+# set defaults   --------------------------------------------------------------
+
+setDefaults() {
+  cfgFile="$0.cfg"
+  logFile="$0.log"
+  force=0
+  summaryOnly=0
+  allModules=1
+
+  # number of processors to use
+  : ${PMAX:=`ls -1d /sys/devices/system/cpu/cpu[0-9]* | wc -l`}
+
+  # directory of this script and all support-files
+  SRC_PATH="$( cd "$(dirname "$0")" ; pwd -P )"
+}
+
+# parse arguments and set variables -------------------------------------------
+
+parseArguments() {
+  while getopts ":C:L:fSh" opt; do
+    case $opt in
+      C) cfgFile="$OPTARG";;
+      L) logFile="$OPTARG";;
+      f) force=1;;
+      S) summaryOnly=1;;
+      h) usage;;
+      ?) echo "error: illegal option: $OPTARG"
+           usage;;
+    esac
+  done
+  shift $((OPTIND-1))
+
+  if [ "$1" = "all" ]; then
+    # extract module list from this file
+    moduleList=$(sed -ne '/^install_/s/install_\(.*\)(.*/\1/p' "$0")
+  else
+    # use modules from the command line
+    moduleList="$@"
+    allModules=0
+  fi
+}
+
+# check arguments   -----------------------------------------------------------
+
+checkArguments() {
+  if [ "$UID" != "0" ]; then
+    echo "error: you need to be root to run this script!" >&2
+    exit 3
+  fi
+  if [ ! -f "$cfgFile" ]; then
+   echo "error: could not find $cfgFile!"
+   exit 3
+  fi
+
+  # check free space (override with -f)
+  if [ $force -eq 0 ]; then
+    let size=`stat -f -c "%S*%f/1024/1024" /`
+    if [ $size -lt 4000 ]; then
+      echo "error: you need at least 4GB free disk space to run this script!" >&2
+      exit 3
+    fi
+  fi
+}
+
+# write message   ------------------------------------------------------------
+
+msg() {
+  echo -e "$(date): $1"
+}
+
+# --- update package system   ------------------------------------------------
+
+install_update() {
+  msg "info: updating packages"
+  apt-get update
+}
+
+# --- upgrade system   -------------------------------------------------------
+
+install_upgrade() {
+  msg "info: upgrading system"
+  apt-get -y upgrade
+}
+
+# --- install more swap-space (needed for compiles)   ------------------------
+
+install_swap() {
+  echo "CONF_SWAPSIZE=1024" > /etc/dphys-swapfile
+  /sbin/dphys-swapfile swapoff
+  /sbin/dphys-swapfile setup
+  /sbin/dphys-swapfile swapon
+}
+
+# --- basic development-packages  --------------------------------------------
+
+install_devtools() {
+  msg "info: installing development tools and environment"
+  apt-get -y install git-core \
+                     python-dev python-pip python-pyaudio libyaml-dev \
+                     bison \
+                     libasound2-dev libportaudio-dev \
+                     subversion autoconf libtool automake gfortran g++ \
+                     build-essential zlib1g-dev flex libesd0-dev libsndfile1-dev
+}
+
+# --- change alsa configuration (output goes to 3.5mm jack)   ----------------
+
+install_alsa() {
+  sed -i -e "/options snd-usb-audio/s/-2/0/" /etc/modprobe.d/alsa-base.conf
+  alsa force-reload
+}
+
+# --- add user jarvis   ------------------------------------------------------
+
+install_user() {
+  msg "info: creating user $USER_ADD for jarvis"
+
+  # create system user (no login)
+  adduser --system --disabled-login --gecos "" --no-create-home \
+              --group --home "$PREFIX/lib/jarvis"  $USER_ADD
+  adduser $USER_ADD audio
+}
+
+# --- install jarvis   -------------------------------------------------------
+
+install_jarvis() {
+  # install jarvis and it's rewquirements
+  cd ${PREFIX}/lib
+  if [ ! -d jarvis ]; then
+    git clone https://github.com/affordablewindurbines/jarvisproject.git jarvisproject
+  fi
+  pip install --upgrade setuptools
+  pip install -r jarvis/client/requirements.txt
+
+  # add default profile for jarvis
+  if [ -f "$SRC_PATH/profile.yml" ]; then
+    cp "$SRC_PATH/profile.yml" "$PREFIX/lib/jarvis"
+  else
+    msg "error: could not find profile.yml"
+  fi
+
+  chmod +x "jarvis/jarvis.py"
+
+  # install wrapper script
+  cat > "$PREFIX/bin/jarvis" <<EOF
+#!/bin/bash
+export LD_LIBRARY_PATH="$PREFIX/lib"
+$PREFIX/lib/jarvis/jarvis.py "\$@"
+EOF
+  chown root:staff "$PREFIX/bin/jarvis"
+  chmod +x "$PREFIX/bin/jarvis"
+}
+
+# --- install pocket-sphinx   -----------------------------------------------
+
+install_pocketsphinx() {
+  eval `grep "VERSION_ID" /etc/os-release`
+  if [ $VERSION_ID -gt 7 ]; then
+    apt-get -y install pocketsphinx
+  else
+    echo 'deb http://ftp.debian.org/debian jessie main contrib non-free' > \
+         /etc/apt/sources.list.d/jessie.list
+    apt-get update
+    # the following command also pulls in
+    # pocketsphinx-lm-en-hub4 pocketsphinx-hmm-en-hub4wsj
+    apt-get -y --force-yes -t jessie install pocketsphinx python-pocketsphinx
+    rm -f /etc/apt/sources.list.d/jessie.list
+    apt-get update
+  fi
+}
+
+# --- install pocket-sphinx english data   ----------------------------------
+
+install_pocketsphinx_data() {
+  # english data for pocketsphinx
+  eval `grep "VERSION_ID" /etc/os-release`
+  if [ $VERSION_ID -gt 7 ]; then
+    apt-get -y install pocketsphinx-lm-en-hub4 pocketsphinx-hmm-en-hub4wsj
+  else
+    echo 'deb http://ftp.debian.org/debian jessie main contrib non-free' > \
+         /etc/apt/sources.list.d/jessie.list
+    apt-get update
+    apt-get -y --force-yes -t jessie install \
+       pocketsphinx-lm-en-hub4 pocketsphinx-hmm-en-hub4wsj
+    rm -f /etc/apt/sources.list.d/jessie.list
+    apt-get update
+  fi
+}
+
+# --- install pocket-sphinx from source   -----------------------------------
+
+install_pocketsphinx_src() {
+
+  # sphinxbase
+  mkdir -p /usr/local/src
+  cd /usr/local/src
+  [ ! -f sphinxbase-${SPHINX_VERSION}.tar.gz ] && \
+    wget http://downloads.sourceforge.net/project/cmusphinx/sphinxbase/${SPHINX_VERSION}/sphinxbase-${SPHINX_VERSION}.tar.gz
+  if [ ! -f sphinxbase-${SPHINX_VERSION}.tar.gz ]; then
+    msg "error: download of sphinxbase failed"
+    return 3
+  fi
+
+  tar -zxf sphinxbase-${SPHINX_VERSION}.tar.gz
+  cd sphinxbase-${SPHINX_VERSION}/
+  ./configure --enable-fixed
+  make -j $PMAX
+  make install PREFIX="$PREFIX"
+
+  # pocketsphinx
+  cd /usr/local/src
+  [ ! -f pocketsphinx-${SPHINX_VERSION}.tar.gz ] && \
+    wget http://downloads.sourceforge.net/project/cmusphinx/pocketsphinx/${SPHINX_VERSION}/pocketsphinx-${SPHINX_VERSION}.tar.gz
+  if [ ! -f pocketsphinx-${SPHINX_VERSION}.tar.gz ]; then
+    msg "error: download of pocketsphinx failed"
+    return 3
+  fi
+
+  tar -zxf pocketsphinx-${SPHINX_VERSION}.tar.gz
+  cd pocketsphinx-${SPHINX_VERSION}/
+  ./configure
+  make -j $PMAX
+  make install PREFIX="$PREFIX"
+}
+
+# --- install configuration for pocketsphinx   -------------------------------
+
+install_pocketsphinx_cfg() {
+  # add configuration to profile.yml
+  if [ "$ACTIVE_STT" = "pocketsphinx" ]; then
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+stt_engine: sphinx
+pocketsphinx:
+  fst_model: '$PREFIX/lib/phonetisaurus/g014b2b.fst'
+  hmm_dir: '/usr/share/pocketsphinx/model/hmm/en_US/hub4wsj_sc_8k'
+EOF
+  else
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+#stt_engine: sphinx
+#pocketsphinx:
+#  fst_model: '$PREFIX/lib/phonetisaurus/g014b2b.fst'
+#  hmm_dir: '/usr/share/pocketsphinx/model/hmm/en_US/hub4wsj_sc_8k'
+EOF
+  fi
+}
+
+# --- install CMUCLMTK   -----------------------------------------------------
+
+install_CMUCLMTK() {
+  mkdir -p /usr/local/src
+  cd /usr/local/src
+  if [ ! -d cmuclmtk ]; then
+    svn co https://svn.code.sf.net/p/cmusphinx/code/trunk/cmuclmtk/
+  fi
+  cd cmuclmtk/
+  ./autogen.sh && make -j $PMAX && make install PREFIX="$PREFIX"
+}
+
+# --- install OpenFST   ------------------------------------------------------
+
+install_openfst() {
+  local cpus="$PMAX"
+  if [ "$PMAX" -eq 4 ]; then
+    # to prevent excessive swapping on model 2
+    cpus=2
+  fi
+  cd /usr/local/src
+  [ ! -f openfst-${OPENFST_VERSION}.tar.gz ] && \
+    wget http://www.openfst.org/twiki/pub/FST/FstDownload/openfst-${OPENFST_VERSION}.tar.gz
+
+  if [ ! -f openfst-${OPENFST_VERSION}.tar.gz ]; then
+    msg "error: download of openfst failed"
+    return 3
+  fi
+
+  tar -xzf openfst-${OPENFST_VERSION}.tar.gz
+  cd openfst-${OPENFST_VERSION}
+  ./configure --enable-compact-fsts --enable-const-fsts --enable-far \
+              --enable-lookahead-fsts --enable-pdt \
+              --enable-static=no
+  make -j $cpus
+  make install PREFIX="$PREFIX"
+
+  # patch include-file (needed by phonetisaurus, workaround for gcc 4.6-bug)
+  sed -i  \
+      -e '/\.begin[^(]/s/\.begin/.begin_/g' \
+      -e '/>begin[^(]/s/>begin/>begin_/g' \
+      -e '/\.end[^(]/s/\.end/.end_/g' \
+      -e '/>end[^(]/s/>end/>end_/g' /usr/local/include/fst/interval-set.h
+}
+
+# --- install m2m_aligner   --------------------------------------------------
+
+install_m2m_aligner() {
+  cd /usr/local/src
+  [ ! -f m2m-aligner-${M2M_ALIGNER_VERSION}.tar.gz ] && \
+    wget https://m2m-aligner.googlecode.com/files/m2m-aligner-${M2M_ALIGNER_VERSION}.tar.gz
+  if [ ! -f m2m-aligner-${M2M_ALIGNER_VERSION}.tar.gz ]; then
+    msg "error: download of m2m-aligner failed"
+    return 3
+  fi
+
+  tar -xzf m2m-aligner-${M2M_ALIGNER_VERSION}.tar.gz
+  cd m2m-aligner-${M2M_ALIGNER_VERSION}/
+  make -j $PMAX
+  install -m 755 m2m-aligner ${PREFIX}/bin
+}
+
+# --- install mitlm   --------------------------------------------------------
+
+install_mitlm() {
+  cd /usr/local/src
+  [ ! -f mitlm-${MITLM_VERSION}.tar.gz ] && \
+    wget https://mitlm.googlecode.com/files/mitlm-${MITLM_VERSION}.tar.gz
+  if [ ! -f mitlm-${MITLM_VERSION}.tar.gz ]; then
+    msg "error: download of mitlm failed"
+    return 3
+  fi
+
+  tar -xzf mitlm-${MITLM_VERSION}.tar.gz
+  cd mitlm-${MITLM_VERSION}/
+  ./configure
+  make -j $PMAX
+  make install PREFIX="$PREFIX"
+}
+
+# --- install phonetisaurus   ------------------------------------------------
+
+install_phonetisaurus() {
+  cd /usr/local/src
+  [ ! -f phonetisaurus-${PHONETISAURUS_VERSION}.tgz ] && \
+    wget https://www.dropbox.com/s/154q9yt3xenj2gr/phonetisaurus-${PHONETISAURUS_VERSION}.tgz
+  if [ ! -f phonetisaurus-${PHONETISAURUS_VERSION}.tgz ]; then
+    msg "error: download of phonetisaurus failed"
+    return 3
+  fi
+
+  tar -xzf phonetisaurus-${PHONETISAURUS_VERSION}.tgz
+  cd phonetisaurus-${PHONETISAURUS_VERSION}/phonetisaurus/src
+  make -j $PMAX ../../bin/phonetisaurus-g2p
+  install -m 755 ../../bin/phonetisaurus-g2p ${PREFIX}/bin
+}
+
+# --- install phonetisaurus FST model   --------------------------------------
+
+install_phonetisaurus_fst() {
+  cd /usr/local/src
+  [ ! -f  g014b2b.tgz ] && \
+    wget -O g014b2b.tgz https://www.dropbox.com/s/kfht75czdwucni1/g014b2b.tgz?dl=0
+  if [ ! -f  g014b2b.tgz ]; then
+    msg "error: download of g014b2b  failed"
+    return 3
+  fi
+
+  tar -xzf g014b2b.tgz
+  cd g014b2b/
+  LD_LIBRARY_PATH="$PREFIX/lib" ./compile-fst.sh
+  cd ..
+  rm -fr  "${PREFIX}/lib/phonetisaurus"
+  mv g014b2b "${PREFIX}/lib/phonetisaurus"
+}
+
+# --- install Phonetisaurus, m2m-aligner and MITLM   -------------------------
+
+install_phonetisaurus_exp() {
+  echo 'deb http://ftp.debian.org/debian experimental main contrib non-free' > \
+       /etc/apt/sources.list.d/experimental.list
+  apt-get update
+  apt-get -y --force-yes -t experimental install phonetisaurus m2m-aligner mitlm
+}
+
+# --- install julius   ------------------------------------------------------
+
+install_julius() {
+  cd /usr/local/src
+  [ ! -f  julius-${JULIUS_VERSION}.tar.gz ] && \
+    wget -O julius-${JULIUS_VERSION}.tar.gz \
+    "http://osdn.jp/frs/redir.php?m=iij&f=%2Fjulius%2F60273%2Fjulius-${JULIUS_VERSION}.tar.gz"
+  if [ ! -f  julius-${JULIUS_VERSION}.tar.gz ]; then
+    msg "error: download of julius failed"
+    return 3
+  fi
+
+  [ ! -d "julius-${JULIUS_VERSION}" ] && tar -xzf julius-${JULIUS_VERSION}.tar.gz
+  cd julius-${JULIUS_VERSION}
+  ./configure --enable-words-int
+  make -j $PMAX
+  make install PREFIX="$PREFIX"
+}
+
+# --- install julius model and lexicon   ------------------------------------
+
+install_julius_modlex() {
+  cd "$PREFIX/src"
+  [ ! -f "VoxForge.tgz" ] && \
+    wget "http://www.repository.voxforge1.org/downloads/SpeechCorpus/Trunk/Lexicon/VoxForge.tgz"
+
+  mkdir "$PREFIX/lib/julius-models"
+  tar -xzf "VoxForge.tgz" --strip-components=1 \
+                          -C "$PREFIX/lib/julius-models" VoxForge/VoxForgeDict
+
+  [ ! -f "Julius_AcousticModels_16kHz-16bit_MFCC_O_D_($JULIUS_AM_VERSION).tgz" ] && \
+  wget "http://www.repository.voxforge1.org/downloads/Main/Tags/Releases/$JULIUS_AM_VERSION/Julius_AcousticModels_16kHz-16bit_MFCC_O_D_($JULIUS_AM_VERSION).tgz"
+
+  tar -xzf "Julius_AcousticModels_16kHz-16bit_MFCC_O_D_($JULIUS_AM_VERSION).tgz" \
+      -C "$PREFIX/lib/julius-models" hmmdefs tiedlist
+
+  # add configuration to profile.yml
+  if [ "$ACTIVE_STT" = "julius" ]; then
+    cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+julius:
+  hmmdefs: '$PREFIX/lib/julius-models/hmmdefs'
+  tiedlist: '$PREFIX/lib/julius-models/tiedlist'
+  lexicon: '$PREFIX/lib/julius-models/VoxForgeDict'
+EOF
+  else
+    cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+#julius:
+#  hmmdefs: '$PREFIX/lib/julius-models/hmmdefs'
+#  tiedlist: '$PREFIX/lib/julius-models/tiedlist'
+#  lexicon: '$PREFIX/lib/julius-models'
+EOF
+  fi
+}
+
+# --- install configuration for julius   -------------------------------------
+
+install_julius_cfg() {
+  # add configuration to profile.yml
+  if [ "$ACTIVE_STT" = "julius" ]; then
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+stt_engine: julius
+EOF
+  else
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+#stt_engine: julius
+EOF
+  fi
+}
+
+# --- install festival   -----------------------------------------------------
+
+install_festival() {
+  apt-get -y install festival festvox-don
+
+  # add configuration to profile.yml
+  if [ "$ACTIVE_TTS" = "festival" ]; then
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+tts_engine: festival-tts
+EOF
+  else
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+#tts_engine: festival-tts
+EOF
+  fi
+}
+
+# --- install flite   --------------------------------------------------------
+
+install_flite() {
+  apt-get -y install flite
+
+  # add configuration to profile.yml
+  if [ "$ACTIVE_TTS" = "flite" ]; then
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+tts_engine: flite-tts
+flite-tts:
+  voice: 'slt'
+EOF
+  else
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+#tts_engine: flite-tts
+#flite-tts:
+#  voice: 'slt'
+EOF
+  fi
+}
+
+# --- install svox pico   ---------------------------------------------------
+
+install_svoxpico() {
+  apt-get -y install libttspico-utils
+
+  # add configuration to profile.yml
+  if [ "$ACTIVE_TTS" = "svoxpico" ]; then
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+tts_engine: pico-tts
+EOF
+  else
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+#tts_engine: pico-tts
+EOF
+  fi
+}
+
+# --- install google TTS   ---------------------------------------------------
+
+install_google_tts() {
+  apt-get -y install python-pymad
+  pip install --upgrade gTTS
+
+  # add configuration to profile.yml
+  if [ "$ACTIVE_TTS" = "google" ]; then
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+tts_engine: google-tts
+EOF
+  else
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+#tts_engine: google-tts
+EOF
+  fi
+}
+
+# --- install ivona   --------------------------------------------------------
+
+install_ivona() {
+  apt-get -y install python-pymad
+  pip install --upgrade pyvona
+
+  # add configuration to profile.yml
+  if [ "$ACTIVE_TTS" = "ivona" ]; then
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+tts_engine: ivona-tts
+ivona-tts:
+  # Keys can be obtained via:
+  # https://www.ivona.com/us/account/speechcloud/creation/
+  access_key: 'access_key' # required
+  secret_key: 'secret_key' # required
+  voice: 'Eric' # optional, default is 'Brian'
+  region: 'eu-west' # optional, default is 'us-east'
+  speech_rate: 'medium' # optional
+  sentence_break: 400 # optional
+EOF
+  else
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+#tts_engine: ivona-tts
+#ivona-tts:
+#  # Keys can be obtained via:
+#  # https://www.ivona.com/us/account/speechcloud/creation/
+#  access_key: 'access_key' # required
+#  secret_key: 'secret_key' # required
+#  voice: 'Eric' # optional, default is 'Brian'
+#  region: 'eu-west' # optional, default is 'us-east'
+#  speech_rate: 'medium' # optional
+#  sentence_break: 400 # optional
+EOF
+  fi
+}
+
+# --- install espeak   -------------------------------------------------------
+
+install_espeak() {
+  apt-get -y install espeak
+
+  # add configuration to profile.yml
+  if [ "$ACTIVE_TTS" = "espeak" ]; then
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+tts_engine: espeak-tts
+espeak-tts:
+  voice: 'default+m3'
+  pitch_adjustment: 40
+  words_per_minute: 120
+EOF
+  else
+cat >> $PREFIX/lib/jarvis/profile.yml <<EOF
+#tts_engine: espeak-tts
+#espeak-tts:
+#  voice: 'default+m3'
+#  pitch_adjustment: 40
+#  words_per_minute: 120
+EOF
+  fi
+}
+
+# --- finalize   -------------------------------------------------------------
+
+install_finalize() {
+  # fix ownership of source
+  msg "info: fixing ownership of files below $PREFIX"
+  if [ "$PREFIX" = "/usr/local" ]; then
+    chown -R root:staff "$PREFIX/src" "$PREFIX/lib"
+  else
+    chown -R root:root "$PREFIX/src" "$PREFIX/lib"
+  fi
+  chown -R $USER_ADD:$USER_ADD "$PREFIX/lib/jarvis"
+
+  # copy profile.yml to directory of default user
+  msg "info: copying profile.yml to default user $DEFAULT_USER"
+  if [ -n "$DEFAULT_USER" -a -d "/home/$DEFAULT_USER" ]; then
+    mkdir -p "/home/$DEFAULT_USER/.jarvis"
+    cp $PREFIX/lib/jarvis/profile.yml "/home/$DEFAULT_USER/.jarvis"
+    chown -R --reference="/home/$DEFAULT_USER" "/home/$DEFAULT_USER/.jarvis"
+  fi
+
+  # reset swap
+  msg "info: resetting swap-size"
+  echo "CONF_SWAPSIZE=100" > /etc/dphys-swapfile
+  /sbin/dphys-swapfile swapoff
+  /sbin/dphys-swapfile setup
+  /sbin/dphys-swapfile swapon
+}
+
+# --- cleanup   --------------------------------------------------------------
+
+install_cleanup() {
+  rm -fr "$PREFIX/src"/*
+}
+
+# --- install system service   -----------------------------------------------
+
+install_service() {
+  if [ -f "jarvis" ]; then
+    cp jarvis /etc/init.d
+    chmod +x /etc/init.d/jarvis
+    chown root:root /etc/init.d/jarvis
+    update-rc.d jarvis defaults
+  else
+    msg "error: could not find service-script jarvis"
+  fi
+}
+
+# --- replace jarvis with THOMAS   -------------------------------------------
+
+install_jarvis() {
+  # patch listening word
+  sed -i -e '/Conversation(/s/jarvis/JARVIS/' "$PREFIX/lib/jarvis/jarvis.py"
+
+  # update files
+  cp "$SRC_PATH"/Jarvis/* "$PREFIX/lib/jarvis/static"
+}
+
+# --- install a module   -----------------------------------------------------
+
+do_install() {
+  declare -i start duration
+  local var
+  var="INSTALL_$module"
+  if [ -z "${!var}" -a $allModules -eq 1 ]; then
+    msg "error: INSTALL_$module is unset!"
+    return
+  elif [ "${!var}" = "0" -a $allModules -eq 1 ]; then
+    msg "info: not installing module $module"
+    return
+  elif [ "${!var}" = "0" -a $force -eq 0 ]; then
+    msg "info: not installing module $module - use option -f to override"
+    return
+  fi
+
+  start=$SECONDS
+  msg "info: installing module $module"
+  eval install_$module
+  msg "info: install of module $module finished"
+  let duration=$SECONDS-start
+  msg "info: duration for module $module: $duration sec"
+}
+
+# --- print summary   --------------------------------------------------------
+
+printSummary() {
+  echo -e "\n\nSummary:\n"
+  head -n 1 "$logFile"
+  echo
+  grep "duration for module" "$logFile"
+  echo
+  tail -n 2 "$logFile"
+}
+
+# --- main program   ---------------------------------------------------------
+
+setDefaults
+parseArguments "$@"
+
+if [ $summaryOnly -eq 1 ]; then
+  [ -f "$logFile" ] && printSummary
+  exit 0
+fi
+
+checkArguments
+source "$cfgFile"
+
+SECONDS=0
+msg "info: start time: $(date)" | tee "$logFile"
+for module in $moduleList; do
+  do_install "$module" 2>&1 | tee -a "$logFile"
+done
+msg "info: total duration: $SECONDS sec" >> "$logFile"
+msg "info: end time: $(date)"            >> "$logFile"
+
+printSummary
